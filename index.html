@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+        <!-- ...existing code... -->
+    <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.module.js"
+      }
+    }
+    </script>
+    <!-- ...existing code... -->
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kepler Saturn Particle System</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; font-family: 'Segoe UI', sans-serif; }
+        #canvas-container { width: 100vw; height: 100vh; position: absolute; top: 0; left: 0; z-index: 1; }
+        
+        /* 摄像头预览 (隐藏，仅用于逻辑处理) */
+        .input_video { display: none; }
+
+        /* UI 界面 */
+        #ui-layer {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            z-index: 10;
+            color: rgba(255, 255, 255, 0.8);
+            pointer-events: none; /* 让点击穿透到Canvas */
+        }
+        h1 { margin: 0; font-weight: 300; letter-spacing: 2px; text-transform: uppercase; font-size: 1.5rem; text-shadow: 0 0 10px rgba(78, 205, 196, 0.5); }
+        p { margin: 5px 0 0 0; font-size: 0.8rem; color: #aaa; }
+        
+        #status {
+            margin-top: 10px;
+            padding: 5px 10px;
+            background: rgba(0,0,0,0.5);
+            border: 1px solid rgba(255,255,255,0.2);
+            border-radius: 4px;
+            display: inline-block;
+            font-size: 0.8rem;
+        }
+
+        /* 按钮容器 */
+        #controls {
+            position: absolute;
+            bottom: 30px;
+            right: 30px;
+            z-index: 10;
+            pointer-events: auto;
+        }
+        
+        .btn {
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            color: white;
+            padding: 10px 20px;
+            cursor: pointer;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            transition: all 0.3s ease;
+            backdrop-filter: blur(5px);
+        }
+        .btn:hover { background: rgba(255, 255, 255, 0.3); box-shadow: 0 0 15px rgba(255,255,255,0.5); }
+
+        /* 加载动画 */
+        #loader {
+            position: absolute;
+            top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            z-index: 20;
+            text-align: center;
+        }
+    </style>
+    <!-- 引入 MediaPipe -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+</head>
+<body>
+
+    <div id="ui-layer">
+        <h1>Kepler Saturn</h1>
+        <p>Interactive Particle System</p>
+        <div id="status">Waiting for camera...</div>
+        <p style="margin-top:5px; font-size: 0.7rem;">张开手掌：放大/混沌 | 握拳：缩小/变暗</p>
+    </div>
+
+    <div id="loader">Initializing Neural Network & GPU...</div>
+
+    <div id="controls">
+        <button class="btn" id="fs-btn">Fullscreen</button>
+    </div>
+
+    <!-- 视频输入源 -->
+    <video class="input_video"></video>
+    
+    <!-- Three.js 容器 -->
+    <div id="canvas-container"></div>
+
+    <!-- ES Module 引入 Three.js -->
+    <script type="module">
+        import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.module.js';
+        import { EffectComposer } from 'https://cdn.jsdelivr.net/npm/three@0.128.0/examples/jsm/postprocessing/EffectComposer.js';
+        import { RenderPass } from 'https://cdn.jsdelivr.net/npm/three@0.128.0/examples/jsm/postprocessing/RenderPass.js';
+        import { UnrealBloomPass } from 'https://cdn.jsdelivr.net/npm/three@0.128.0/examples/jsm/postprocessing/UnrealBloomPass.js';
+
+        // ==========================================
+        // 1. 初始化 & 变量定义
+        // ==========================================
+        const container = document.getElementById('canvas-container');
+        const statusDiv = document.getElementById('status');
+        const loader = document.getElementById('loader');
+        
+        // 核心变量
+        let handOpenness = 0; // 0 (拳头) - 1 (张开)
+        let targetOpenness = 0;
+        
+        // 场景变量
+        const scene = new THREE.Scene();
+        // 增加迷雾，增强深空感
+        scene.fog = new THREE.FogExp2(0x000000, 0.0005);
+
+        const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(0, 30, 60);
+        camera.lookAt(0, 0, 0);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: "high-performance" });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // 限制像素比以保证性能
+        container.appendChild(renderer.domElement);
+
+        // ==========================================
+        // 2. 后处理 (Bloom 辉光)
+        // ==========================================
+        const renderScene = new RenderPass(scene, camera);
+        
+        // 参数：分辨率, 强度, 半径, 阈值
+        const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.85);
+        bloomPass.strength = 2.0;
+        bloomPass.radius = 0.5;
+        bloomPass.threshold = 0.1;
+
+        const composer = new EffectComposer(renderer);
+        composer.addPass(renderScene);
+        composer.addPass(bloomPass);
+
+        // ==========================================
+        // 3. 粒子系统 (ShaderMaterial)
+        // ==========================================
+        
+        // 顶点着色器：处理开普勒运动、缩放和混沌噪点
+        const vertexShader = `
+            uniform float uTime;
+            uniform float uScale; // 当前手势控制的缩放/进度 (0.0 - 1.0)
+            
+            attribute float aSize;
+            attribute float aSpeed;
+            attribute float aRadius;
+            attribute float aAngleOffset;
+            attribute float aRandom; // 随机种子
+            attribute vec3 aColor;
+            
+            varying vec3 vColor;
+            varying float vAlpha;
+
+            // 伪随机函数
+            float random(vec2 st) {
+                return fract(sin(dot(st.xy, vec2(12.9898,78.233))) * 43758.5453123);
+            }
+
+            // 简单的3D噪点函数
+            vec3 noise3D(float t, float seed) {
+                return vec3(
+                    sin(t * 10.0 + seed),
+                    cos(t * 12.0 + seed * 2.0),
+                    sin(t * 15.0 + seed * 3.0)
+                );
+            }
+
+            void main() {
+                vColor = aColor;
+
+                // --- 基础物理规律 (开普勒模拟) ---
+                // 角速度 omega 也就是速度，与半径的 -1.5 次方成正比 (Kepler's 3rd Law: T^2 ~ r^3 => omega ~ r^-1.5)
+                // 为了视觉效果，我们稍微调整参数
+                float angularSpeed = aSpeed * 20.0 * pow(aRadius, -1.5);
+                
+                // 基础轨道位置
+                float currentAngle = aAngleOffset + uTime * angularSpeed;
+                
+                // 基础缩放：手张开时，整体模型变大
+                // minScale = 0.5, maxScale = 5.0
+                float globalScale = mix(0.5, 8.0, uScale); 
+                
+                float x = cos(currentAngle) * aRadius * globalScale;
+                float z = sin(currentAngle) * aRadius * globalScale;
+                float y = 0.0; 
+
+                // --- 混沌效应 (Chaos) ---
+                // 当 scale 接近 1.0 (手完全张开) 时，引入高频震动
+                // 阈值：当 uScale > 0.8 开始抖动
+                float chaosFactor = smoothstep(0.8, 1.0, uScale);
+                
+                // 混沌位移：布朗运动
+                vec3 chaosOffset = noise3D(uTime, aRandom) * chaosFactor * 10.0 * (aRadius * 0.5);
+                
+                // 核心球体的厚度稍微增加
+                if (aRadius < 2.0) {
+                    y = (random(vec2(aRandom, uTime)) - 0.5) * 2.0 * globalScale;
+                }
+
+                vec3 finalPos = vec3(x, y, z) + chaosOffset;
+
+                // --- 视图变换 ---
+                vec4 mvPosition = modelViewMatrix * vec4(finalPos, 1.0);
+                gl_Position = projectionMatrix * mvPosition;
+
+                // --- 粒子大小 & 亮度物理规律 ---
+                // 距离相机越近越大
+                gl_PointSize = aSize * (300.0 / -mvPosition.z);
+                
+                // 物理规律：物体越小(Scale小) 能量密度越低(暗)，物体越大(Scale大) 能量爆发(亮)
+                // 同时也受混沌影响，混沌时亮度极高
+                float brightnessPhysics = mix(0.2, 1.5, uScale); // 基础亮度变化
+                brightnessPhysics += chaosFactor * 2.0; // 爆发时的过曝
+
+                vAlpha = brightnessPhysics;
+            }
+        `;
+
+        // 片元着色器：绘制圆形粒子和辉光
+        const fragmentShader = `
+            uniform sampler2D pointTexture;
+            varying vec3 vColor;
+            varying float vAlpha;
+
+            void main() {
+                // 生成软圆形粒子
+                vec2 coord = gl_PointCoord - vec2(0.5);
+                float dist = length(coord);
+                if (dist > 0.5) discard;
+
+                // 边缘模糊 (Soft particle)
+                float strength = 1.0 - (dist * 2.0);
+                strength = pow(strength, 1.5);
+
+                gl_FragColor = vec4(vColor, strength * vAlpha);
+            }
+        `;
+
+        // 生成粒子数据
+        const particleCount = 80000; // 8万个粒子，保证画面极致且流畅
+        const geometry = new THREE.BufferGeometry();
+        
+        const positions = []; // 不再直接使用position attribute更新，完全依靠shader
+        const sizes = [];
+        const speeds = [];
+        const radii = [];
+        const angleOffsets = [];
+        const randoms = [];
+        const colors = [];
+
+        const colorCore = new THREE.Color(0xffaa33); // 土星核心黄
+        const colorRingInner = new THREE.Color(0xccaa88);
+        const colorRingOuter = new THREE.Color(0x6688ff); // 外部冰蓝
+
+        for (let i = 0; i < particleCount; i++) {
+            // 简单的平面分布，之后在shader里计算位置
+            positions.push(0,0,0); 
+
+            // 分布逻辑：一部分是核心球体，一部分是环
+            let r, speed, size, color;
+            const rand = Math.random();
+
+            if (rand < 0.2) {
+                // 20% 粒子在核心球体
+                r = Math.random() * 1.5; 
+                speed = 0.5 + Math.random() * 0.5;
+                size = Math.random() * 1.5;
+                color = colorCore;
+            } else {
+                // 80% 粒子在环
+                // 环的半径分布 2.5 -> 8.0
+                r = 2.5 + Math.random() * 5.5;
+                speed = 1.0; // 基础速度因子
+                size = Math.random() * 1.0;
+                
+                // 颜色插值
+                const lerpFactor = (r - 2.5) / 5.5;
+                color = colorRingInner.clone().lerp(colorRingOuter, lerpFactor);
+            }
+
+            radii.push(r);
+            sizes.push(size);
+            speeds.push(speed);
+            angleOffsets.push(Math.random() * Math.PI * 2);
+            randoms.push(Math.random() * 100);
+            colors.push(color.r, color.g, color.b);
+        }
+
+        geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+        geometry.setAttribute('aRadius', new THREE.Float32BufferAttribute(radii, 1));
+        geometry.setAttribute('aSize', new THREE.Float32BufferAttribute(sizes, 1));
+        geometry.setAttribute('aSpeed', new THREE.Float32BufferAttribute(speeds, 1));
+        geometry.setAttribute('aAngleOffset', new THREE.Float32BufferAttribute(angleOffsets, 1));
+        geometry.setAttribute('aRandom', new THREE.Float32BufferAttribute(randoms, 1));
+        geometry.setAttribute('aColor', new THREE.Float32BufferAttribute(colors, 3));
+
+        // 创建 ShaderMaterial
+        const material = new THREE.ShaderMaterial({
+            uniforms: {
+                uTime: { value: 0 },
+                uScale: { value: 0 }
+            },
+            vertexShader: vertexShader,
+            fragmentShader: fragmentShader,
+            transparent: true,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending // 叠加混合模式，让重叠的粒子更亮
+        });
+
+        const particles = new THREE.Points(geometry, material);
+        scene.add(particles);
+
+        // ==========================================
+        // 4. MediaPipe 手势识别逻辑
+        // ==========================================
+        const videoElement = document.getElementsByClassName('input_video')[0];
+
+        function onResults(results) {
+            loader.style.display = 'none'; // 隐藏加载提示
+
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                const landmarks = results.multiHandLandmarks[0];
+                
+                // 计算手掌开合程度
+                // 算法：计算大拇指指尖(4)与其他四指指尖(8,12,16,20)到手腕(0)的平均距离
+                
+                const wrist = landmarks[0];
+                const tips = [4, 8, 12, 16, 20];
+                let totalDist = 0;
+
+                tips.forEach(idx => {
+                    const tip = landmarks[idx];
+                    const dx = tip.x - wrist.x;
+                    const dy = tip.y - wrist.y;
+                    const dz = tip.z - wrist.z; // Z轴大概估算
+                    totalDist += Math.sqrt(dx*dx + dy*dy + dz*dz);
+                });
+
+                const avgDist = totalDist / 5.0;
+
+                // 经验值：握拳时 avgDist 约 0.15-0.2，张开时约 0.4-0.5
+                // 归一化到 0 - 1
+                let openness = (avgDist - 0.2) / (0.45 - 0.2);
+                openness = Math.max(0, Math.min(1, openness)); // Clamp
+
+                targetOpenness = openness;
+                statusDiv.innerText = "Tracking Active | Openness: " + (openness * 100).toFixed(0) + "%";
+                statusDiv.style.color = "#4ecdc4";
+            } else {
+                // 没有检测到手，缓慢回归中间状态或0
+                targetOpenness = 0.0; 
+                statusDiv.innerText = "No Hand Detected";
+                statusDiv.style.color = "#ff6b6b";
+            }
+        }
+
+        const hands = new Hands({locateFile: (file) => {
+            return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+        }});
+
+        hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+
+        hands.onResults(onResults);
+
+        const cameraUtils = new Camera(videoElement, {
+            onFrame: async () => {
+                await hands.send({image: videoElement});
+            },
+            width: 640,
+            height: 480
+        });
+        
+        // 启动摄像头
+        cameraUtils.start().then(() => {
+            console.log("Camera started");
+        }).catch(err => {
+            statusDiv.innerText = "Camera Error: " + err.message;
+        });
+
+        // ==========================================
+        // 5. 动画循环与交互逻辑
+        // ==========================================
+        
+        const clock = new THREE.Clock();
+        
+        // 全屏逻辑
+        document.getElementById('fs-btn').addEventListener('click', () => {
+            if (!document.fullscreenElement) {
+                document.documentElement.requestFullscreen();
+                document.getElementById('fs-btn').innerText = "Exit Fullscreen";
+            } else {
+                if (document.exitFullscreen) {
+                    document.exitFullscreen();
+                    document.getElementById('fs-btn').innerText = "Fullscreen";
+                }
+            }
+        });
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const elapsedTime = clock.getElapsedTime();
+
+            // 1. 平滑插值更新 handOpenness (Lerp)
+            // 使手势反应有物理惯性，不突兀
+            handOpenness += (targetOpenness - handOpenness) * 0.1;
+
+            // 2. 更新 Shader Uniforms
+            material.uniforms.uTime.value = elapsedTime;
+            material.uniforms.uScale.value = handOpenness;
+
+            // 3. 摄像机微动 (增加临场感)
+            // 当混沌模式开启(handOpenness大)时，摄像机也轻微震动
+            const shake = handOpenness > 0.8 ? (handOpenness - 0.8) * 0.5 : 0;
+            camera.position.x = Math.sin(elapsedTime * 0.5) * 5 + (Math.random()-0.5)*shake;
+            camera.position.y = 30 + Math.cos(elapsedTime * 0.3) * 5 + (Math.random()-0.5)*shake;
+            camera.lookAt(0, 0, 0);
+
+            // 4. 渲染 (使用 Composer 进行 Bloom 渲染)
+            composer.render();
+        }
+
+        // 窗口大小自适应
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            composer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        animate();
+
+    </script>
+</body>
+</html>
